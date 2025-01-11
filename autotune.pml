@@ -70,7 +70,6 @@ byte nWorkingUnitsPerDevice = 0;
 byte nWorkingPEsPerUnit = 0;
 byte allWorkingPEs = 0;
 byte nRunningPEs = 0;
-byte nReadyWorkingPEsPerUnit = 0;
 
 int globalTime = 0;
 bool final = false;
@@ -251,8 +250,8 @@ proctype device(chan d_hst; chan hst_d) {
                 }
             }
         :: else ->
-            wgId = unitIdx + 1;
             unitIdx = 0;
+            wgId = unitIdx + 1;
             do
             :: unitIdx < nWorkGroups - nWorkingUnitsPerDevice ->
                 atomic {
@@ -288,8 +287,6 @@ proctype device(chan d_hst; chan hst_d) {
 
 
 proctype host() {
-    byte deviceIdx = 0;
-
     chan d_hst = [0] of { mtype : action };
     chan hst_d = [0] of { mtype : action };
 
@@ -318,15 +315,14 @@ active proctype main() {
     workGroupSize = INPUT_DATA_SIZE >> (n - i);
 
     select (i : 1 .. n - 1);
-    tileSize = INPUT_DATA_SIZE >> (n-i);
-    tileSize = (workGroupSize * tileSize > INPUT_DATA_SIZE -> workGroupSize : tileSize);
+    tileSize = INPUT_DATA_SIZE >> (n - i);
+    tileSize = (workGroupSize * tileSize > INPUT_DATA_SIZE -> INPUT_DATA_SIZE / workGroupSize : tileSize);
 
     nWorkGroups = INPUT_DATA_SIZE / (workGroupSize * tileSize);  
     nWorkingDevices = (nWorkGroups <= UNITS_PER_DEVICE * DEVICES -> nWorkGroups / UNITS_PER_DEVICE : DEVICES);
     nWorkingDevices = (nWorkGroups / UNITS_PER_DEVICE -> nWorkingDevices : 1);
     nWorkingUnitsPerDevice = (nWorkGroups <= UNITS_PER_DEVICE -> nWorkGroups : UNITS_PER_DEVICE);
     nWorkingPEsPerUnit = (workGroupSize <= PES_PER_UNIT -> workGroupSize : PES_PER_UNIT);
-    nReadyWorkingPEsPerUnit = nWorkingPEsPerUnit;
     allWorkingPEs = nWorkingDevices * nWorkingUnitsPerDevice * nWorkingPEsPerUnit;
 
     atomic {
