@@ -72,6 +72,7 @@ byte allWorkingPEs = 0;
 byte nRunningPEs = 0;
 
 int globalTime = 0;
+int Tmin = 16;
 bool final = false;
 
 mtype : action = { done, stop, go, gowg, eoi, neoi };
@@ -330,3 +331,7 @@ active proctype main() {
         run clock();
     }
 }
+
+ltl NonTerm  { [] !final }
+ltl Fin { <> final }
+ltl OverTime { [] (final -> (globalTime > Tmin)) }
