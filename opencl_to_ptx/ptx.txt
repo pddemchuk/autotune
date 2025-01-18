@@ -1,0 +1,243 @@
+.entry sum_even(
+	.param .u64 .ptr .global .align 4 sum_even2_param_0,					&my_cl_array							global int *glob
+	.param .u64 .ptr .global .align 4 sum_even2_param_1,					&my_cl_sum								global int *output
+	.param .u64 .ptr .shared .align 4 sum_even2_param_2,					*local_item_size						local int *loc
+	.param .u32 sum_even2_param_3											&TS_real								int TS
+)
+
+{
+	.reg .pred %p<28>;
+	.reg .b32 %r<96>;
+	.reg .b64 %rd<51>;
+	// загрузка аргументов функции kernel.cl, tid
+	ld.param.u64 %rd13, [sum_even2_param_0];								// rd13									адрес исходного массива
+	ld.param.u64 %rd14, [sum_even2_param_1];								// rd14									адрес переменной output (содержащей ответ)
+	ld.param.u64 %rd15, [sum_even2_param_2];								// rd15									адрес локального массива
+	ld.param.u32 %r26, [sum_even2_param_3];									// r26 									tile size
+	// int my_elem = get_local_id(0);
+	mov.u32 %r1, %tid.x;													// r1 									work item's local id (within warp)
+	// получение индекса/адреса в локальной памяти | loc[my_elem] ~ [rd1]
+	mul.wide.s32 %rd16, %r1, 4;												// rd16 = r1 * 4 						индекс в локальной памяти, принадлежащей [my_elem]
+	add.s64 %rd1, %rd15, %rd16;												// rd1 = rd15 + rd16					адрес в локальной памяти (абсолютный)
+	// loc[my_elem] = 0;
+	mov.u32 %r91, 0;														// rd91 = 0
+	st.shared.u32 [%rd1], %r91;												// [rd1] = 0  							первый элемент лок массива в 0
+	// if tile size < 1 go_to BB1_11
+	setp.lt.s32 %p1, %r26, 1;												// p1 = 1 if r26 < 1 					если tile size < 1
+	@%p1 bra BB1_11;
+
+	// какие-то железо-ориентированные индексы
+	mov.b32 %r35, %envreg3;													// r35									driver-specific execution environment special r/o register
+	// get_global_id(0)
+	mov.u32 %r36, %ctaid.x;													// r36									work item's global id (within grid)
+	mov.u32 %r37, %ntid.x;													// r37									cta size (warp size)
+	// real local id? 
+	add.s32 %r38, %r35, %r1;												// r38 = r35 + r1 						special (get real r1?) 
+	// low(get_global_id(0) * PES_PER_UNIT) + real local id | какой-то local id
+	mad.lo.s32 %r39, %r36, %r37, %r38;										// r39 = low(r36 * r37) + r38			r39
+	// ?local_id * TS | индекс в исходном массиве данных
+	mul.wide.s32 %rd2, %r39, %r26;											// rd2 = r39 * r26
+	and.b32 %r34, %r26, 3;													// r34 = r26 & 3 						r34 = tile size & 0..011 (остаток от деления tile size на 4)
+	mov.u32 %r87, 0;														// r87 = 0 								итератор
+	// if TS % 4 = 0
+	setp.eq.s32 %p2, %r34, 0;												// p2 = 1 if r34 == 0
+	@%p2 bra BB1_2; 
+
+	// if TS % 4 = 1
+	setp.eq.s32 %p3, %r34, 1;												// p3 = 1 if r34 == 1
+	@%p3 bra BB1_4;
+	bra.uni BB1_5;
+
+BB1_4:	// TS % 4 = 1
+	mov.u32 %r86, %r87;														// r86 = r87							r86 = 0
+	bra.uni BB1_8;
+
+BB1_2:	// TS % 4 = 0
+	mov.u32 %r91, %r87;														// r91 = r87							r91 = 0
+	bra.uni BB1_9;
+
+BB1_5:	// TS % 4 != 0 && TS % 4 != 1
+	// if TS % 4 = 2
+	setp.eq.s32 %p4, %r34, 2;												// p4 = 1 if r34 == 2
+	mov.u32 %r84, %r87;														// r84 = r87
+	@%p4 bra BB1_7;
+
+	// TS % 4 = 3
+	cvt.s64.s32 %rd17, %rd2;												// rd17 = (64bit)rd2 					индекс в исходном массиве данных idx (или i??)
+	shl.b64 %rd18, %rd17, 2;												// rd18 = rd17 << 2 					rd18 = rd17 * 4 адрес
+	add.s64 %rd19, %rd13, %rd18;											// rd19 = rd13 + rd18					адрес my_cl_array + rd18
+	ld.global.u32 %r41, [%rd19];											// r41 = [rd19]							glob[idx]
+	mov.u32 %r87, 1;														// r87 = 1
+	// glob[idx] % 2
+	and.b32 %r42, %r41, 1;													// r42 = r41 & 1
+	// if glob[idx] % 2 == 1
+	setp.eq.b32 %p5, %r42, 1;												// p5 = 1 if r42 == 1 					glob[idx] % 2 == 1
+	not.pred %p6, %p5;														// p6 = !p5 							glob[idx] % 2 == 0
+	selp.b32 %r84, %r41, 0, %p6;											// r84 = (p6 == 1) ? r41 : 0 			r84 = glob[idx] if glob[idx] % 2 == 0
+
+BB1_7:	// TS % 4 = 2
+	cvt.u64.u32 %rd20, %r87;												// rd20 = (64bit)r87					= 0 or 1 итератор
+	// int i = 0 or 1
+	add.s64 %rd21, %rd2, %rd20;												// rd21 = rd2 + rd20					индекс
+	cvt.s64.s32 %rd22, %rd21;												// rd22 = (64bit)rd21					
+	shl.b64 %rd23, %rd22, 2;												// rd23 = rd22 << 2 					rd23 = rd22 * 4 адрес
+	add.s64 %rd24, %rd13, %rd23;											// rd24 = rd13 + rd23  					адрес my_cl_array + rd23
+	ld.global.u32 %r43, [%rd24];											// r43 = [rd24]							glob[idx]
+	and.b32 %r44, %r43, 1;													// r44 = r43 & 1
+	setp.eq.b32 %p7, %r44, 1;												// p7 = 1 if r44 == 1 					glob[idx] % 2 == 1
+	not.pred %p8, %p7;														// p8 = !p7 							glob[idx] % 2 == 0
+	selp.b32 %r45, %r43, 0, %p8;											// r45 = (p8 == 1) ? r43 : 0 			r45 = glob[idx] if glob[idx] % 2 == 0
+	// sum += glob[idx];
+	add.s32 %r86, %r84, %r45;												// r86 = r84 + r45
+	add.s32 %r87, %r87, 1;													// r87 = r87 + 1 						= 1 or 2
+
+// то же самое что и 1_7 но с другими регистрами... (другая итерация?)
+BB1_8:	// TS % 4 = 1
+	cvt.u64.u32 %rd25, %r87;												// rd25 = (64bit)r87					= 0 or 1 or 2 итератор
+	add.s64 %rd26, %rd2, %rd25;												// rd26 = rd2 + rd25					индекс
+	cvt.s64.s32 %rd27, %rd26;												// rd27 = (64bit)rd26
+	shl.b64 %rd28, %rd27, 2;												// rd28 = rd27 << 2 					адрес rd28 = rd27 * 4
+	add.s64 %rd29, %rd13, %rd28;											// rd29 = rd13 + rd28					адрес my_cl_array + rd28
+	ld.global.u32 %r46, [%rd29];											// r46 = [rd29]							glob[idx]
+	and.b32 %r47, %r46, 1;													// r47 = r46 & 1
+	setp.eq.b32 %p9, %r47, 1;												// p9 = 1 if r47 == 1 					glob[idx] % 2 == 1
+	not.pred %p10, %p9;														// p10 = !p9 							glob[idx] % 2 == 0
+	selp.b32 %r48, %r46, 0, %p10;											// r48 = (p10 == 1) ? r46 : 0 			r48 = glob[idx] if glob[idx] % 2 == 0
+	// sum += glob[idx];
+	add.s32 %r91, %r86, %r48;												// r91 = r86 + r48 
+	add.s32 %r87, %r87, 1;													// r87 = r87 + 1 						= 1 or 2 or 3 
+
+BB1_9:	// TS % 4 = 0
+	// if TS < 4
+	setp.lt.u32 %p11, %r26, 4;												// p11 = 1 if r26 < 4
+	@%p11 bra BB1_11;
+
+BB1_10:	// for (int i = 0; i < TS; i++) 
+	cvt.u64.u32 %rd30, %r87;												// rd30 = (64bit)r87						= 1 or 2 or 3 итератор
+	add.s64 %rd31, %rd2, %rd30;												// rd31 = rd2 + rd30						индекс
+	cvt.s64.s32 %rd32, %rd31;												// rd32 = (64bit)rd31
+	shl.b64 %rd33, %rd32, 2;												// rd33 = rd32 << 2 						адрес rd33 = rd32 * 4
+	add.s64 %rd34, %rd13, %rd33;											// rd34 = rd13 + rd33						адрес my_cl_array + rd33
+	ld.global.u32 %r49, [%rd34];											// r49 = [rd34]								glob[idx]
+	and.b32 %r50, %r49, 1;													// r50 = r49 & 1
+	setp.eq.b32 %p12, %r50, 1;												// p12 = 1 if r50 == 1 						glob[idx] % 2 == 1
+	not.pred %p13, %p12;													// p13 = !p12 								glob[idx] % 2 == 0
+	selp.b32 %r51, %r49, 0, %p13;											// r51 = (p13 == 1) ? r49 : 0 				r51 = glob[idx] if glob[idx] % 2 == 0
+	// sum += glob[idx];
+	add.s32 %r52, %r91, %r51;												// r52 = r91 + r51
+	ld.global.u32 %r53, [%rd34+4];											// r53 = [rd34 + 4]							адрес my_cl_array + rd33 + 4
+	and.b32 %r54, %r53, 1;													// r54 = r53 & 1
+	setp.eq.b32 %p14, %r54, 1;												// p14 = 1 if r54 == 1
+	not.pred %p15, %p14;													// p15 = !p14
+	selp.b32 %r55, %r53, 0, %p15;											// r55 = (p15 == 1) ? r53 : 0
+	// sum += glob[idx];
+	add.s32 %r56, %r52, %r55;												// r56 = r52 + r55
+	ld.global.u32 %r57, [%rd34+8];											// r57 = [rd34 + 8]							адрес my_cl_array + rd33 + 8
+	and.b32 %r58, %r57, 1;													// r58 = r57 & 1
+	setp.eq.b32 %p16, %r58, 1;												// p16 = 1 if r58 == 1
+	not.pred %p17, %p16;													// p17 = !p16
+	selp.b32 %r59, %r57, 0, %p17;											// r55 = (p15 == 1) ? r53 : 0
+	// sum += glob[idx];
+	add.s32 %r60, %r56, %r59;												// r60 = r56 + r59
+	ld.global.u32 %r61, [%rd34+12];											// r61 = [rd34 + 12]						адрес my_cl_array + rd33 + 12
+	and.b32 %r62, %r61, 1;													// r62 = r61 & 1
+	setp.eq.b32 %p18, %r62, 1;												// p18 = 1 if r62 == 1
+	not.pred %p19, %p18;													// p19 = !p18
+	selp.b32 %r63, %r61, 0, %p19;											// r63 = (p19 == 1) ? r61 : 0
+	// sum += glob[idx];
+	add.s32 %r91, %r60, %r63;												// r91 = r60 + r63
+	add.s32 %r87, %r87, 4;													// r87 = r87 + 4
+	// if i < TS
+	setp.lt.s32 %p20, %r87, %r26;											// p20 = 1 if r87 < r26
+	@%p20 bra BB1_10;
+	
+BB1_11:	// TS < 4 or обработка тайлов закончена
+	st.shared.u32 [%rd1], %r91;												// [rd1] = r91 								= 0 or sum
+	bar.sync 0;																// barrier
+	// if (my_elem != 0)
+	setp.ne.s32 %p21, %r1, 0;												// p21 = 1 if r1 != 0
+	@%p21 bra BB1_23;
+
+	mov.u32 %r18, %ntid.x;													// r18										cta size (warp size) ~ get_local_size(0)
+	setp.lt.u32 %p22, %r18, 2;												// p22 = 1 if r18 < 2
+	@%p22 bra BB1_23;
+
+	add.s32 %r19, %r18, -1;													// r19 = r18 - 1 							PES_PER_UNIT - 1
+	and.b32 %r67, %r19, 3;													// r67 = r19 & 0..011 						(PES_PER_UNIT - 1) % 3
+	mov.u32 %r92, 2;														// r92 = 2
+	mov.u64 %rd46, 1;														// rd46 = 1
+	mov.u32 %r95, 1;														// r95 = 1
+	// if (PES_PER_UNIT - 1) % 3 == 0
+	setp.eq.s32 %p23, %r67, 0;												// p23 = 1 if r67 == 0
+	@%p23 bra BB1_20;
+
+	// if (PES_PER_UNIT - 1) % 3 == 1
+	setp.eq.s32 %p24, %r67, 1;												// p24 = 1 if r67 == 1
+	@%p24 bra BB1_15;
+	bra.uni BB1_16;
+
+BB1_15:	// (PES_PER_UNIT - 1) % 3 == 1
+	mov.u32 %r92, %r95;														// r92 = r95								= 1
+	bra.uni BB1_19;
+
+BB1_16:
+	// if (PES_PER_UNIT - 1) % 3 == 2
+	setp.eq.s32 %p25, %r67, 2;												// p25 = 1 if r67 == 1
+	@%p25 bra BB1_18;
+
+	ld.shared.u32 %r69, [%rd15+4];											// r69 = [rd15 + 4]						[loc + 4]
+	// atomic_add(output, loc[i])
+	atom.global.add.u32 %r70, [%rd14], %r69;								// atomic(r70 = [rd14] + r69)
+	mov.u32 %r92, 3;														// r92 = 3
+	mov.u64 %rd46, 2;														// rd46 = 2
+
+BB1_18:	// (PES_PER_UNIT - 1) % 3 == 2
+	shl.b64 %rd39, %rd46, 2;												// rd39 = rd46 << 2 					rd39 = rd46 * 4 (rd46 = 1 or 2)
+	add.s64 %rd40, %rd15, %rd39;											// rd40 = rd15 + rd39 					адрес loc + rd39
+	ld.shared.u32 %r71, [%rd40];											// r71 = [rd40] 						loc[idx]
+	// atomic_add(output, loc[i])
+	atom.global.add.u32 %r72, [%rd14], %r71;								// atomic(r72 = [rd14] + r71)
+	cvt.u64.u32 %rd46, %r92;												// r46 = (64bit)r92 					= 2 or 3
+
+BB1_19:
+	shl.b64 %rd41, %rd46, 2;												// rd39 = rd46 << 2 					rd39 = rd46 * 4
+	add.s64 %rd42, %rd15, %rd41;											// rd42 = rd15 + rd41 					адрес loc + rd39
+	ld.shared.u32 %r73, [%rd42];											// r73 = [rd42] 						loc[idx]
+	// atomic_add(output, loc[i])
+	atom.global.add.u32 %r74, [%rd14], %r73;								// atomic(r74 = [rd14] + r73)	
+	add.s32 %r95, %r92, 1;													// r95 = r92 + 1 						rd92 = 1 or 2 or 3
+	cvt.s64.s32 %rd46, %r95;												// r46 = (64bit)r95 					индекс 2 or 3 or 4
+
+BB1_20:	// (PES_PER_UNIT - 1) % 3 == 0
+	// if PES_PER_UNIT - 1 < 4
+	setp.lt.u32 %p26, %r19, 4;												// p26 = 1 if r19 < 4
+	@%p26 bra BB1_23;
+
+	mul.wide.s32 %rd43, %r95, 4;											// rd43 = r95 * 4 						r95 = 1 or 2 or 3 or 4
+	add.s64 %rd49, %rd15, %rd43;											// rd49 = rd15 + rd43 					адрес loc + rd43
+
+BB1_22:
+	shl.b64 %rd44, %rd46, 2;												// rd44 = rd46 << 2 					адрес rd44 = rd46 * 4
+	add.s64 %rd45, %rd15, %rd44;											// rd45 = rd15 + rd44
+	ld.shared.u32 %r75, [%rd45];											// r75 = [rd45] 						loc[rd15 + rd44]
+	// atomic_add(output, loc[i])
+	atom.global.add.u32 %r76, [%rd14], %r75;								// atomic(r76 = [rd14] + r75)
+	ld.shared.u32 %r77, [%rd49+4];											// r77 = [rd49 + 4] 					loc[rd15 + rd44 + 4]
+	// atomic_add(output, loc[i])
+	atom.global.add.u32 %r78, [%rd14], %r77;								// atomic(r78 = [rd14] + r77)
+	ld.shared.u32 %r79, [%rd49+8];											// r79 = [rd49 + 8] 					loc[rd15 + rd44 + 8]
+	// atomic_add(output, loc[i])
+	atom.global.add.u32 %r80, [%rd14], %r79;								// atomic(r80 = [rd14] + r79)
+	ld.shared.u32 %r81, [%rd49+12];											// r81 = [rd49 + 12] 					loc[rd15 + rd44 + 12]
+	// atomic_add(output, loc[i])
+	atom.global.add.u32 %r82, [%rd14], %r81;								// atomic(r82 = [rd14] + r81)
+	add.s32 %r95, %r95, 4;													// r95 = r95 + 4
+	cvt.s64.s32 %rd46, %r95;												// rd46 = (64bit)r95
+	add.s64 %rd49, %rd49, 16;												// rd49 = rd49 + 16 					адрес loc + rd43 + 16
+	// if i < get_local_size(0)
+	setp.lt.u32 %p27, %r95, %r18;											// p27 = 1 if r95 < r18
+	@%p27 bra BB1_22;
+
+BB1_23:
+	ret;
+}
