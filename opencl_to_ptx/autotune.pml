@@ -1,9 +1,3 @@
-// int i = blockIdx.x * 512 + threadIdx.x;
-// соответствует коду на PTX:
-// shl.u32 R8, blockIdx, 9;         Сдвиг влево на 9 позиций, 512 = 2^9
-// add.u32 R8, R8, threadIdx.x;     R8:=i
-// shl.u32 R8, R8, 3                Байтовое смещение
-
 // hardware parameters
 #define DEVICES 1
 #define UNITS_PER_DEVICE 1
