@@ -1,2 +1,6 @@
 sum
 test_ptx.pml
+ref.pml
+*.tmp
+*.trail
+log

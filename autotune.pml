@@ -1,7 +1,7 @@
 // hardware parameters
 #define DEVICES 1
-#define UNITS_PER_DEVICE 1
-#define PES_PER_UNIT 4
+#define UNITS_PER_DEVICE 4
+#define PES_PER_UNIT 2
 #define GLOBAL_MEMORY_ACCESS 4
 #define LOCAL_MEMORY_SIZE 8
 
@@ -24,12 +24,12 @@ byte nWaitingPEsOut = 0;
 inline barrier(nWaitingPEs, nWaitingPEsOut, t) {
     FAA(nWaitingPEs, t);
     if
-    :: t < (PES_PER_UNIT - 1) -> nWaitingPEs == 0;
+    :: t < (nWorkingPEsPerUnit * nWorkingUnitsPerDevice - 1) -> nWaitingPEs == 0;
     :: else -> nWaitingPEs = 0;
     fi;
     FAA(nWaitingPEsOut, t);
     if
-    :: t < (PES_PER_UNIT - 1) -> nWaitingPEsOut == 0;
+    :: t < (nWorkingPEsPerUnit * nWorkingUnitsPerDevice - 1) -> nWaitingPEsOut == 0;
     :: else -> nWaitingPEsOut = 0;
     fi;
 }
@@ -79,6 +79,7 @@ mtype : action = { done, stop, go, gowg, eoi, neoi };
 
 byte localMemory[LOCAL_MEMORY_SIZE * UNITS_PER_DEVICE];
 byte globalMemory[INPUT_DATA_SIZE];
+byte aoutput = 0;
 
 // tuning parameters
 int nWorkGroups = 0;
@@ -106,7 +107,7 @@ proctype pex(byte id; byte unitId; chan u_pex; chan pex_u) {
     byte wgIter;
     byte wgId;
     byte localId;        // within wg
-    byte localMemIdx = id + unitId * PES_PER_UNIT;
+    byte localMemIdx = id + unitId * nWorkingPEsPerUnit;
 
     do
     :: u_pex ? wgId, gowg;
@@ -116,7 +117,7 @@ proctype pex(byte id; byte unitId; chan u_pex; chan pex_u) {
                 startTime = globalTime;
                 curTime = globalTime;
             }
-            localId = (workGroupSize > PES_PER_UNIT -> id + wgIter * PES_PER_UNIT : id);
+            localId = (workGroupSize > nWorkingPEsPerUnit -> id + wgIter * nWorkingPEsPerUnit : id);
             globalOffset = tileSize * (wgId * workGroupSize + localId);
             for (tileIdx : 0 .. tileSize - 1) {
                 if
@@ -129,7 +130,7 @@ proctype pex(byte id; byte unitId; chan u_pex; chan pex_u) {
             byte t = 0;
             barrier(nWaitingPEs, nWaitingPEsOut, t);
             if
-            :: (wgIter + 1) >= workGroupSize / PES_PER_UNIT ->
+            :: (wgIter + 1) >= workGroupSize / nWorkingPEsPerUnit ->
                 pex_u ! eoi;
                 break;
             :: else ->
@@ -142,19 +143,25 @@ proctype pex(byte id; byte unitId; chan u_pex; chan pex_u) {
             for (tileIdx : 1 .. nWorkingPEsPerUnit - 1) {
                 sum(localMemory[unitId * nWorkingPEsPerUnit], localMemory[tileIdx + unitId * nWorkingPEsPerUnit]);
                 // не будет работать если кол-во юнитов более одного:
-                globalTime++;
+                /* if
+                :: unitId == 0 -> globalTime++;
+                :: else -> skip;
+                fi; */
             }
             // аналогично:
             atomic {
-                globalMemory[0] = 0;
-                globalTime = globalTime + GLOBAL_MEMORY_ACCESS;
-                sum(globalMemory[0], localMemory[unitId * nWorkingPEsPerUnit]);
-                globalTime = globalTime + GLOBAL_MEMORY_ACCESS;
-                // ?? не совсем корректно считается время
-                // должно быть три обращения к глобальной памяти: чтениe и две записи
-                // или один к глобальной -- все вычисления оставить в локальной, не зануляя [0] элемент
+                /* if
+                :: unitId == 0 -> globalTime = globalTime + GLOBAL_MEMORY_ACCESS;
+                :: else -> skip;
+                fi; */
+                //globalTime = globalTime + GLOBAL_MEMORY_ACCESS;
+                sum(aoutput, localMemory[unitId * nWorkingPEsPerUnit]);
+                //globalTime = globalTime + GLOBAL_MEMORY_ACCESS;
+                /* if
+                :: unitId == 0 -> globalTime = globalTime + GLOBAL_MEMORY_ACCESS;
+                :: else -> skip;
+                fi; */
             }
-            final = true;
         :: else -> skip;
         fi;
         break;
@@ -186,7 +193,7 @@ proctype unit(byte unitIdx; chan dev_u; chan u_dev) {
             }
         }
         if
-        :: workGroupSize <= PES_PER_UNIT ->
+        :: workGroupSize <= nWorkingPEsPerUnit ->
             atomic {
                 for (pesIdx : 0 .. nWorkingPEsPerUnit - 1) {
                     pex_u ? eoi;
@@ -195,7 +202,7 @@ proctype unit(byte unitIdx; chan dev_u; chan u_dev) {
         :: else ->
             wgIter = 1;
             nProc = 0;
-            for (pesIdx : 0 .. workGroupSize - PES_PER_UNIT - 1) {
+            for (pesIdx : 0 .. workGroupSize - nWorkingPEsPerUnit - 1) {
                 atomic {
                     pex_u ? doneFlag;
                     if
@@ -205,7 +212,7 @@ proctype unit(byte unitIdx; chan dev_u; chan u_dev) {
                     fi;
                     nProc++;
                     if
-                    :: nProc >= PES_PER_UNIT ->
+                    :: nProc >= nWorkingPEsPerUnit ->
                         wgIter++;
                         nProc = 0;
                     :: else -> skip;
@@ -241,9 +248,13 @@ proctype device(chan d_hst; chan hst_d) {
     }
     do
     :: hst_d ? go ->
-        dev_u ! 0, go;
+        atomic {
+            for (unitIdx : 0 .. nWorkingUnitsPerDevice - 1) {
+                dev_u ! unitIdx, go;
+            }
+        }
         if
-        :: nWorkGroups <= UNITS_PER_DEVICE ->
+        :: nWorkGroups <= nWorkingUnitsPerDevice ->
             atomic {
                 for (unitIdx : 0 .. nWorkingUnitsPerDevice - 1) {
                     u_dev ? done;
@@ -251,8 +262,8 @@ proctype device(chan d_hst; chan hst_d) {
                 }
             }
         :: else ->
+            wgId = unitIdx;
             unitIdx = 0;
-            wgId = unitIdx + 1;
             do
             :: unitIdx < nWorkGroups - nWorkingUnitsPerDevice ->
                 atomic {
@@ -265,8 +276,7 @@ proctype device(chan d_hst; chan hst_d) {
             od;
             unitIdx = 0;
             do
-            // ????????? не работает если оставшихся воркгрупп меньше чем юнитов (host аналогично)
-            :: unitIdx < UNITS_PER_DEVICE ->
+            :: unitIdx < nWorkingUnitsPerDevice ->
                 atomic {
                     u_dev ? done;
                     allWorkingPEs = allWorkingPEs - nWorkingPEsPerUnit;
@@ -299,6 +309,8 @@ proctype host() {
         d_hst ? done;
         hst_d ! stop;
     }
+
+    final = true;
 }
 
 active proctype main() {
@@ -314,9 +326,11 @@ active proctype main() {
 
     select (i : 2 .. n - 1);
     workGroupSize = INPUT_DATA_SIZE >> (n - i);
+    //workGroupSize = 4;  // 2 4
 
     select (i : 1 .. n - 1);
     tileSize = INPUT_DATA_SIZE >> (n - i);
+    //tileSize = 2;   // 2 4 8
     tileSize = (workGroupSize * tileSize > INPUT_DATA_SIZE -> INPUT_DATA_SIZE / workGroupSize : tileSize);
 
     nWorkGroups = INPUT_DATA_SIZE / (workGroupSize * tileSize);  
@@ -335,3 +349,4 @@ active proctype main() {
 ltl NonTerm  { [] !final }
 ltl Fin { <> final }
 ltl OverTime { [] (final -> (globalTime > Tmin)) }
+ltl Sum { [] (final -> ( aoutput == 72)) }
