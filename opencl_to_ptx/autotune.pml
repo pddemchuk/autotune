@@ -1,3 +1,5 @@
+int Tmin = 27;
+
 // hardware parameters
 #define DEVICES 1
 #define UNITS_PER_DEVICE 1
@@ -6,8 +8,8 @@
 #define LOCAL_MEMORY_SIZE 8
 
 // input data
-#define n 4
-#define INPUT_DATA_SIZE 16  // 2^n
+#define n 2
+#define INPUT_DATA_SIZE 4 // 2^n
 
 // x - FAA register; r - returned value
 inline FAA(x, r) {
@@ -24,12 +26,12 @@ byte nWaitingPEsOut = 0;
 inline barrier(nWaitingPEs, nWaitingPEsOut, t) {
     FAA(nWaitingPEs, t);
     if
-    :: t < (PES_PER_UNIT - 1) -> nWaitingPEs == 0;
+    :: t < (nWorkingPEsPerUnit - 1) -> nWaitingPEs == 0;
     :: else -> nWaitingPEs = 0;
     fi;
     FAA(nWaitingPEsOut, t);
     if
-    :: t < (PES_PER_UNIT - 1) -> nWaitingPEsOut == 0;
+    :: t < (nWorkingPEsPerUnit - 1) -> nWaitingPEsOut == 0;
     :: else -> nWaitingPEsOut = 0;
     fi;
 }
@@ -70,15 +72,17 @@ byte nWorkingUnitsPerDevice = 0;
 byte nWorkingPEsPerUnit = 0;
 byte allWorkingPEs = 0;
 byte nRunningPEs = 0;
+byte nWarps = 0;
+byte nInstructions = 5;
 
 int globalTime = 0;
-int Tmin = 16;
 bool final = false;
 
-mtype : action = { done, stop, go, gowg, eoi, neoi };
+mtype : action = { done, stop, stopwarps, go, gowg, gowarp, eoi, neoi };
 
 byte localMemory[LOCAL_MEMORY_SIZE * UNITS_PER_DEVICE];
 byte globalMemory[INPUT_DATA_SIZE];
+byte aoutput = 0;
 
 // tuning parameters
 int nWorkGroups = 0;
@@ -96,168 +100,174 @@ proctype clock() {
     od
 }
 
-proctype pex(byte id; byte unitId; chan u_pex; chan pex_u) {
-    printf("pex id %d unitid %d \n", id, unitId);
-    int startTime = 0;
-    int curTime = 0;
-
-    byte globalOffset;
-    byte tileIdx;        // iterator over tile elemetns within the wg
-    byte wgIter;
+proctype unit(byte unitIdx; chan sch_u; chan u_sch) {
+    byte pesIdx;
     byte wgId;
-    byte localId;        // within wg
-    byte localMemIdx = id + unitId * PES_PER_UNIT;
+    byte warpId;
+    byte instrId;
+    byte i;
+    byte tileIdx;
+
+    // private memory (registers)
+    byte localId[INPUT_DATA_SIZE];
+    byte localMemIdx[INPUT_DATA_SIZE];
+    byte globalOffset[INPUT_DATA_SIZE];
 
     do
-    :: u_pex ? wgId, gowg;
+    :: sch_u ? 0, wgId, go ->
+
+        for (i : 0 .. LOCAL_MEMORY_SIZE * UNITS_PER_DEVICE - 1) {
+            localMemory[i] = 0;
+        }
+
         do
-        :: u_pex ? wgIter, go ->
-            atomic {
-                startTime = globalTime;
-                curTime = globalTime;
-            }
-            localId = (workGroupSize > PES_PER_UNIT -> id + wgIter * PES_PER_UNIT : id);
-            globalOffset = tileSize * (wgId * workGroupSize + localId);
-            for (tileIdx : 0 .. tileSize - 1) {
-                if
-                :: tileIdx + globalOffset >= INPUT_DATA_SIZE -> break;
+        :: sch_u ? warpId, instrId, gowarp ->
+            if
+            :: instrId == 0 ->
+                atomic {
+                    for (pesIdx : 0 .. nWorkingPEsPerUnit - 1) {
+                        localId[warpId * nWarps + pesIdx] = (workGroupSize > nWorkingPEsPerUnit -> pesIdx + warpId * nWorkingPEsPerUnit : pesIdx);
+                    }
+                }
+            :: instrId == 1 ->
+                atomic {
+                    for (pesIdx : 0 .. nWorkingPEsPerUnit - 1) {
+                        localMemIdx[warpId * nWarps + pesIdx] = pesIdx + unitIdx * nWorkingPEsPerUnit;
+                    }
+                }
+            :: instrId == 2 ->
+                atomic {
+                    for (pesIdx : 0 .. nWorkingPEsPerUnit - 1) {
+                        globalOffset[warpId * nWarps + pesIdx] = tileSize * (wgId * workGroupSize + localId[warpId * nWarps + pesIdx]);
+                    }
+                }
+            :: instrId == 3 ->
+                for (tileIdx : 0 .. tileSize - 1) {
+                    atomic {
+                        for (pesIdx : 0 .. nWorkingPEsPerUnit - 1) {
+                            if
+                            :: tileIdx + globalOffset[warpId * nWarps + pesIdx] >= INPUT_DATA_SIZE -> break;
+                            :: else -> skip;
+                            fi;
+                            even_sum(localMemory[localMemIdx[pesIdx]], globalMemory[tileIdx + globalOffset[warpId * nWarps + pesIdx]]);
+                            globalTime = globalTime + GLOBAL_MEMORY_ACCESS;
+                        }
+                    }
+                }
+            :: instrId == 4 ->
+                if // get_local_id(0) == 0
+                :: warpId + 1 == nWarps ->
+                    for (tileIdx : 1 .. nWorkingPEsPerUnit - 1) {
+                        atomic {
+                            sum(localMemory[unitIdx * nWorkingPEsPerUnit], localMemory[tileIdx + unitIdx * nWorkingPEsPerUnit]);
+                            globalTime++;
+                        }
+                    }
+
+                    globalTime = globalTime + GLOBAL_MEMORY_ACCESS;
+                    atomic {
+                        sum(aoutput, localMemory[unitIdx * nWorkingPEsPerUnit]);
+                    }
+                    globalTime = globalTime + GLOBAL_MEMORY_ACCESS;
                 :: else -> skip;
                 fi;
-                even_sum(localMemory[localMemIdx], globalMemory[tileIdx + globalOffset]);
-                long_work(GLOBAL_MEMORY_ACCESS);
-            }
-            byte t = 0;
-            barrier(nWaitingPEs, nWaitingPEsOut, t);
-            if
-            :: (wgIter + 1) >= workGroupSize / PES_PER_UNIT ->
-                pex_u ! eoi;
-                break;
-            :: else ->
-                pex_u ! neoi;
             fi;
+
+            u_sch ! done;
+        :: sch_u ? 0, 0, stopwarps ->
+            break;
         od;
-    :: u_pex ? 0, stop ->
-        if
-        :: id == 0 ->
-            for (tileIdx : 1 .. nWorkingPEsPerUnit - 1) {
-                sum(localMemory[unitId * nWorkingPEsPerUnit], localMemory[tileIdx + unitId * nWorkingPEsPerUnit]);
-                // не будет работать если кол-во юнитов более одного:
-                globalTime++;
-            }
-            // аналогично:
-            atomic {
-                globalMemory[0] = 0;
-                globalTime = globalTime + GLOBAL_MEMORY_ACCESS;
-                sum(globalMemory[0], localMemory[unitId * nWorkingPEsPerUnit]);
-                globalTime = globalTime + GLOBAL_MEMORY_ACCESS;
-                // ?? не совсем корректно считается время
-                // должно быть три обращения к глобальной памяти: чтениe и две записи
-                // или один к глобальной -- все вычисления оставить в локальной, не зануляя [0] элемент
-            }
-            final = true;
-        :: else -> skip;
-        fi;
+    :: sch_u ? 0, 0, stop ->
         break;
     od;
 }
 
-proctype unit(byte unitIdx; chan dev_u; chan u_dev) {
-    byte pesIdx;
-    byte wgIter;
+proctype scheduler(byte unitIdx; chan dev_sch; chan sch_dev) {
     byte wgId;
-    byte nProc;
-    mtype : Action doneFlag;
+    byte warpId;
 
-    chan u_pex = [0] of {byte, mtype : action};
-    chan pex_u = [0] of {mtype : action};
+    byte instrId;
+    bool readyToRun;
 
-    atomic {
-        for (pesIdx : 0 .. nWorkingPEsPerUnit - 1) {
-            run pex(pesIdx, unitIdx, u_pex, pex_u);
-        }
-    }
+    chan sch_u = [0] of {byte, byte, mtype : action};
+    chan u_sch = [0] of {mtype : action};
+
+    chan warps = [16] of {int, int, bool};      // warpId, instrId, readyToRun
+
+    run unit(unitIdx, sch_u, u_sch);
+
     do
-    :: dev_u ? wgId, go ->
-        wgIter = 0;
-        atomic {
-            for (pesIdx : 0 .. nWorkingPEsPerUnit - 1) {
-                u_pex ! wgId, gowg;
-                u_pex ! wgIter, go;
-            }
+    :: dev_sch ? wgId, go ->
+
+        sch_u ! 0, wgId, go;
+
+        for (warpId : 0 .. nWarps - 1) {
+            warps ! warpId, 0, true;
         }
-        if
-        :: workGroupSize <= PES_PER_UNIT ->
-            atomic {
-                for (pesIdx : 0 .. nWorkingPEsPerUnit - 1) {
-                    pex_u ? eoi;
-                }
-            }
-        :: else ->
-            wgIter = 1;
-            nProc = 0;
-            for (pesIdx : 0 .. workGroupSize - PES_PER_UNIT - 1) {
-                atomic {
-                    pex_u ? doneFlag;
-                    if
-                    :: doneFlag == neoi ->
-                        u_pex ! wgIter, go;
-                    :: else -> skip
-                    fi;
-                    nProc++;
-                    if
-                    :: nProc >= PES_PER_UNIT ->
-                        wgIter++;
-                        nProc = 0;
-                    :: else -> skip;
-                    fi;
-                }
-            }
-            for (pesIdx : 0 .. nWorkingPEsPerUnit - 1) {
-                pex_u ? eoi;
-            }
-        fi;
-        u_dev ! done;
-    :: dev_u ? 0, stop ->
-        atomic {
-            for (pesIdx : 0 .. nWorkingPEsPerUnit - 1) {
-                u_pex ! 0, stop;
-            }
-        }
+
+        do
+        :: nempty(warps) ->
+            warps ? warpId, instrId, readyToRun;
+            if
+            :: readyToRun ->
+                sch_u ! warpId, instrId, gowarp;
+                u_sch ? done;
+                instrId++;
+                if
+                :: instrId < nInstructions ->
+                    warps ! warpId, instrId, readyToRun;
+                :: else ->
+                    skip;
+                fi;
+            :: else ->
+                warps ! warpId, instrId, readyToRun;
+            fi;
+        :: empty(warps) ->
+            sch_u ! 0, 0, stopwarps;
+            break;
+        od;
+        sch_dev ! done;
+    :: dev_sch ? 0, stop ->
+        sch_u ! 0, 0, stop;
         break;
     od;
 }
 
 proctype device(chan d_hst; chan hst_d) {
-    byte unitIdx;
     byte wgId;
+    byte unitIdx;
 
-    chan dev_u = [0] of {byte, mtype : action};     // wgId
-    chan u_dev = [0] of {mtype : action};
+    chan dev_sch = [0] of {byte, mtype : action};
+    chan sch_dev = [0] of {mtype : action};
 
     atomic {
         for (unitIdx : 0 .. nWorkingUnitsPerDevice - 1) {
-            run unit(unitIdx, dev_u, u_dev);
+            run scheduler(unitIdx, dev_sch, sch_dev);
         }
     }
     do
     :: hst_d ? go ->
-        dev_u ! 0, go;
+        atomic {
+            for (unitIdx : 0 .. nWorkingUnitsPerDevice - 1) {
+                dev_sch ! unitIdx, go;
+            }
+        }
         if
-        :: nWorkGroups <= UNITS_PER_DEVICE ->
+        :: nWorkGroups <= nWorkingUnitsPerDevice ->
             atomic {
                 for (unitIdx : 0 .. nWorkingUnitsPerDevice - 1) {
-                    u_dev ? done;
+                    sch_dev ? done;
                     allWorkingPEs = allWorkingPEs - nWorkingPEsPerUnit;
                 }
             }
         :: else ->
+            wgId = unitIdx;
             unitIdx = 0;
-            wgId = unitIdx + 1;
             do
             :: unitIdx < nWorkGroups - nWorkingUnitsPerDevice ->
                 atomic {
-                    u_dev ? done;
-                    dev_u ! wgId, go;
+                    sch_dev ? done;
+                    dev_sch ! wgId, go;
                     wgId++;
                     unitIdx++;
                 }
@@ -265,10 +275,9 @@ proctype device(chan d_hst; chan hst_d) {
             od;
             unitIdx = 0;
             do
-            // ????????? не работает если оставшихся воркгрупп меньше чем юнитов (host аналогично)
-            :: unitIdx < UNITS_PER_DEVICE ->
+            :: unitIdx < nWorkingUnitsPerDevice ->
                 atomic {
-                    u_dev ? done;
+                    sch_dev ? done;
                     allWorkingPEs = allWorkingPEs - nWorkingPEsPerUnit;
                     unitIdx++;
                 }
@@ -279,13 +288,12 @@ proctype device(chan d_hst; chan hst_d) {
     :: hst_d ? stop ->
         atomic {
             for (unitIdx : 0 .. nWorkingUnitsPerDevice - 1) {
-                dev_u ! 0, stop;
+                dev_sch ! 0, stop;
             }
         }
         break;
     od;
 }
-
 
 proctype host() {
     chan d_hst = [0] of { mtype : action };
@@ -299,6 +307,8 @@ proctype host() {
         d_hst ? done;
         hst_d ! stop;
     }
+
+    final = true;
 }
 
 active proctype main() {
@@ -314,9 +324,11 @@ active proctype main() {
 
     select (i : 2 .. n - 1);
     workGroupSize = INPUT_DATA_SIZE >> (n - i);
+    //workGroupSize = 2;  // 2 4
 
     select (i : 1 .. n - 1);
     tileSize = INPUT_DATA_SIZE >> (n - i);
+    //tileSize = 4;   // 2 4 8
     tileSize = (workGroupSize * tileSize > INPUT_DATA_SIZE -> INPUT_DATA_SIZE / workGroupSize : tileSize);
 
     nWorkGroups = INPUT_DATA_SIZE / (workGroupSize * tileSize);
@@ -325,6 +337,7 @@ active proctype main() {
     nWorkingUnitsPerDevice = (nWorkGroups <= UNITS_PER_DEVICE -> nWorkGroups : UNITS_PER_DEVICE);
     nWorkingPEsPerUnit = (workGroupSize <= PES_PER_UNIT -> workGroupSize : PES_PER_UNIT);
     allWorkingPEs = nWorkingDevices * nWorkingUnitsPerDevice * nWorkingPEsPerUnit;
+    nWarps = workGroupSize / nWorkingPEsPerUnit;
 
     atomic {
         run host();
@@ -335,3 +348,4 @@ active proctype main() {
 ltl NonTerm  { [] !final }
 ltl Fin { <> final }
 ltl OverTime { [] (final -> (globalTime > Tmin)) }
+ltl Sum { [] (final -> ( aoutput == 20)) }
