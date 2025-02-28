@@ -76,7 +76,8 @@ byte nWarps = 0;
 byte nInstructions = 5;
 
 int globalTime = 0;
-bool final = false;
+byte unitsFinal = 0;
+bool final;
 
 mtype : action = { done, stop, stopwarps, go, gowg, gowarp, eoi, neoi };
 
@@ -178,11 +179,12 @@ proctype unit(byte unitIdx; chan sch_u; chan u_sch) {
             break;
         od;
     :: sch_u ? 0, 0, stop ->
+        unitsFinal++;
         break;
     od;
 }
 
-proctype scheduler(byte unitIdx; chan dev_sch; chan sch_dev) {
+proctype warp_scheduler(byte unitIdx; chan dev_sch; chan sch_dev) {
     byte wgId;
     byte warpId;
 
@@ -236,21 +238,39 @@ proctype scheduler(byte unitIdx; chan dev_sch; chan sch_dev) {
 proctype device(chan d_hst; chan hst_d) {
     byte wgId;
     byte unitIdx;
+    bool readyToRun;
 
     chan dev_sch = [0] of {byte, mtype : action};
     chan sch_dev = [0] of {mtype : action};
 
+    chan workgroups = [16] of {int, bool};      // wgId, readyToRun
+
+    for (wgId : 0 .. nWorkGroups - 1) {
+        workgroups ! wgId, true;
+    }
+
     atomic {
         for (unitIdx : 0 .. nWorkingUnitsPerDevice - 1) {
-            run scheduler(unitIdx, dev_sch, sch_dev);
+            run warp_scheduler(unitIdx, dev_sch, sch_dev);
         }
     }
     do
     :: hst_d ? go ->
         atomic {
-            for (unitIdx : 0 .. nWorkingUnitsPerDevice - 1) {
-                dev_sch ! unitIdx, go;
-            }
+            unitIdx = 0;
+            do
+            :: unitIdx < nWorkingUnitsPerDevice ->
+                workgroups ? wgId, readyToRun;
+                if
+                :: readyToRun ->
+                    dev_sch ! wgId, go;
+                    unitIdx++;
+                :: else ->
+                    workgroups ! wgId, readyToRun;
+                fi;
+            :: else ->
+                break;
+            od;
         }
         if
         :: nWorkGroups <= nWorkingUnitsPerDevice ->
@@ -261,15 +281,26 @@ proctype device(chan d_hst; chan hst_d) {
                 }
             }
         :: else ->
-            wgId = unitIdx;
             unitIdx = 0;
             do
             :: unitIdx < nWorkGroups - nWorkingUnitsPerDevice ->
                 atomic {
                     sch_dev ? done;
-                    dev_sch ! wgId, go;
-                    wgId++;
-                    unitIdx++;
+                    bool wgWaiting = true;
+                    do
+                    :: wgWaiting ->
+                        workgroups ? wgId, readyToRun;
+                        if
+                        :: readyToRun ->
+                            dev_sch ! wgId, go;
+                            wgWaiting = false;
+                            unitIdx++;
+                        :: else ->
+                            workgroups ! wgId, readyToRun;
+                        fi;
+                    :: else ->
+                        break;
+                    od;
                 }
             :: else -> break;
             od;
@@ -308,6 +339,7 @@ proctype host() {
         hst_d ! stop;
     }
 
+    unitsFinal == nWorkingUnitsPerDevice;
     final = true;
 }
 
@@ -323,12 +355,12 @@ active proctype main() {
     }
 
     select (i : 2 .. n - 1);
-    workGroupSize = INPUT_DATA_SIZE >> (n - i);
-    //workGroupSize = 2;  // 2 4
+    //workGroupSize = INPUT_DATA_SIZE >> (n - i);
+    workGroupSize = 2;  // 2 4
 
     select (i : 1 .. n - 1);
-    tileSize = INPUT_DATA_SIZE >> (n - i);
-    //tileSize = 4;   // 2 4 8
+    //tileSize = INPUT_DATA_SIZE >> (n - i);
+    tileSize = 2;   // 2 4 8
     tileSize = (workGroupSize * tileSize > INPUT_DATA_SIZE -> INPUT_DATA_SIZE / workGroupSize : tileSize);
 
     nWorkGroups = INPUT_DATA_SIZE / (workGroupSize * tileSize);
@@ -348,4 +380,4 @@ active proctype main() {
 ltl NonTerm  { [] !final }
 ltl Fin { <> final }
 ltl OverTime { [] (final -> (globalTime > Tmin)) }
-ltl Sum { [] (final -> ( aoutput == 20)) }
+ltl Sum { [] (final -> ( aoutput == 72 )) }
