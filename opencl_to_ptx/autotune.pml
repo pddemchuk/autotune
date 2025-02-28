@@ -2,14 +2,14 @@ int Tmin = 27;
 
 // hardware parameters
 #define DEVICES 1
-#define UNITS_PER_DEVICE 1
-#define PES_PER_UNIT 4
+#define UNITS_PER_DEVICE 2
+#define PES_PER_UNIT 2
 #define GLOBAL_MEMORY_ACCESS 4
 #define LOCAL_MEMORY_SIZE 8
 
 // input data
-#define n 2
-#define INPUT_DATA_SIZE 4 // 2^n
+#define n 4
+#define INPUT_DATA_SIZE 16 // 2^n
 
 // x - FAA register; r - returned value
 inline FAA(x, r) {
@@ -126,19 +126,19 @@ proctype unit(byte unitIdx; chan sch_u; chan u_sch) {
             :: instrId == 0 ->
                 atomic {
                     for (pesIdx : 0 .. nWorkingPEsPerUnit - 1) {
-                        localId[warpId * nWarps + pesIdx] = (workGroupSize > nWorkingPEsPerUnit -> pesIdx + warpId * nWorkingPEsPerUnit : pesIdx);
+                        localId[pesIdx * nWarps + warpId] = (workGroupSize > nWorkingPEsPerUnit -> pesIdx + warpId * nWorkingPEsPerUnit : pesIdx);
                     }
                 }
             :: instrId == 1 ->
                 atomic {
                     for (pesIdx : 0 .. nWorkingPEsPerUnit - 1) {
-                        localMemIdx[warpId * nWarps + pesIdx] = pesIdx + unitIdx * nWorkingPEsPerUnit;
+                        localMemIdx[pesIdx * nWarps + warpId] = pesIdx + unitIdx * nWorkingPEsPerUnit;
                     }
                 }
             :: instrId == 2 ->
                 atomic {
                     for (pesIdx : 0 .. nWorkingPEsPerUnit - 1) {
-                        globalOffset[warpId * nWarps + pesIdx] = tileSize * (wgId * workGroupSize + localId[warpId * nWarps + pesIdx]);
+                        globalOffset[pesIdx * nWarps + warpId] = tileSize * (wgId * workGroupSize + localId[pesIdx * nWarps + warpId]);
                     }
                 }
             :: instrId == 3 ->
@@ -146,10 +146,10 @@ proctype unit(byte unitIdx; chan sch_u; chan u_sch) {
                     atomic {
                         for (pesIdx : 0 .. nWorkingPEsPerUnit - 1) {
                             if
-                            :: tileIdx + globalOffset[warpId * nWarps + pesIdx] >= INPUT_DATA_SIZE -> break;
+                            :: tileIdx + globalOffset[pesIdx * nWarps + warpId] >= INPUT_DATA_SIZE -> break;
                             :: else -> skip;
                             fi;
-                            even_sum(localMemory[localMemIdx[pesIdx]], globalMemory[tileIdx + globalOffset[warpId * nWarps + pesIdx]]);
+                            even_sum(localMemory[localMemIdx[pesIdx * nWarps + warpId]], globalMemory[tileIdx + globalOffset[pesIdx * nWarps + warpId]]);
                             globalTime = globalTime + GLOBAL_MEMORY_ACCESS;
                         }
                     }
