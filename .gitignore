@@ -5,3 +5,5 @@ ref.pml
 *.trail
 log*
 *.drawio
+*.sh
+!scripts/*.sh
