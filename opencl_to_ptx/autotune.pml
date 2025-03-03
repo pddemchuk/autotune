@@ -186,8 +186,6 @@ proctype warp_scheduler(byte unitIdx; chan dev_sch; chan sch_dev) {
     byte instrId;
     bool readyToRun;
 
-    byte ready;
-
     chan sch_u = [0] of {byte, byte, mtype : action};
     chan u_sch = [0] of {mtype : action};
 
@@ -201,9 +199,7 @@ proctype warp_scheduler(byte unitIdx; chan dev_sch; chan sch_dev) {
         sch_u ! 0, wgId, go;
 
         for (warpId : 0 .. nWarps - 1) {
-            select (ready : 0 .. 1);
-            //ready = 1;
-            warps ! warpId, 0, ready;
+            warps ! warpId, 0, true;
         }
 
         do
@@ -221,9 +217,7 @@ proctype warp_scheduler(byte unitIdx; chan dev_sch; chan sch_dev) {
                     skip;
                 fi;
             :: else ->
-                select (ready : 0 .. 1);
-                //ready = 1;
-                warps ! warpId, instrId, ready;
+                warps ! warpId, instrId, true;
             fi;
         :: empty(warps) ->
             sch_u ! 0, 0, stopwarps;
@@ -248,9 +242,7 @@ proctype device(chan d_hst; chan hst_d) {
     chan workgroups = [16] of {int, bool};      // wgId, readyToRun
 
     for (wgId : 0 .. nWorkGroups - 1) {
-        select (ready : 0 .. 1);
-        //ready = 1;
-        workgroups ! wgId, ready;
+        workgroups ! wgId, true;
     }
 
     atomic {
@@ -270,9 +262,7 @@ proctype device(chan d_hst; chan hst_d) {
                     dev_sch ! wgId, go;
                     unitIdx++;
                 :: else ->
-                    select (ready : 0 .. 1);
-                    //ready = 1;
-                    workgroups ! wgId, ready;
+                    workgroups ! wgId, true;
                 fi;
             :: else ->
                 break;
@@ -302,9 +292,7 @@ proctype device(chan d_hst; chan hst_d) {
                             wgWaiting = false;
                             unitIdx++;
                         :: else ->
-                            select (ready : 0 .. 1);
-                            //ready = 1;
-                            workgroups ! wgId, ready;
+                            workgroups ! wgId, true;
                         fi;
                     :: else ->
                         break;
