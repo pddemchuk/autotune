@@ -82,10 +82,12 @@ int globalTime = 0;
 byte unitsFinal = 0;
 bool final;
 
-mtype : action = { done, stop, stopwarps, go, gowg, gowarp, eoi, neoi };
+mtype : action = { done, stop, stopwarps, go, gowg, gowarp, donewarp };
 
 byte globalMemory[INPUT_DATA_SIZE];
 byte aoutput = 0;
+
+bool isWarpReadyToRun[INPUT_DATA_SIZE / PES_PER_UNIT * UNITS_PER_DEVICE];     // nWarps ~ INPUT_DATA_SIZE / PES_PER_UNIT
 
 // tuning parameters
 int nWorkGroups = 0;
@@ -141,7 +143,6 @@ proctype unit(byte unitIdx; chan sch_u; chan u_sch) {
                     }
                 }
             :: instrId == 2 ->
-                for (tileIdx : 0 .. tileSize - 1) {
                     atomic {
                         for (pesIdx : 0 .. nWorkingPEsPerUnit - 1) {
                             if
@@ -152,24 +153,33 @@ proctype unit(byte unitIdx; chan sch_u; chan u_sch) {
                             globalTime = globalTime + GLOBAL_MEMORY_ACCESS;
                         }
                     }
-                }
                 nWaitingWarps[wgId]++;
             :: instrId == 3 ->
                 if // get_local_id(0) == 0
-                //:: localId[warpId] == 0 ->
                 :: nWaitingWarps[wgId] == nWarps ->
-                    nWaitingWarps[wgId] = 0;
-                    for (i : 0 .. LOCAL_MEMORY_SIZE - 1) {
-                        atomic {
-                            sum(aoutput, localMemory[i]);
-                            globalTime++;
+                    if
+                    :: localId[warpId] == 0 ->
+                        nWaitingWarps[wgId] = 0;
+                        for (i : 0 .. LOCAL_MEMORY_SIZE - 1) {
+                            atomic {
+                                sum(aoutput, localMemory[i]);
+                                globalTime++;
+                            }
                         }
-                    }
-                :: else -> skip;
+                    :: else ->
+                        isWarpReadyToRun[unitIdx * nWarps + 0] = true;
+                    fi;
+                :: else ->
+                    isWarpReadyToRun[unitIdx * nWarps + warpId] = false;
+                    if
+                    :: localId[warpId] == 0 ->
+                        instrId--;
+                    :: else -> skip;
+                    fi;
                 fi;
             fi;
 
-            u_sch ! done;
+            u_sch ! instrId, donewarp;
         :: sch_u ? 0, 0, stopwarps ->
             break;
         od;
@@ -184,12 +194,11 @@ proctype warp_scheduler(byte unitIdx; chan dev_sch; chan sch_dev) {
     byte warpId;
 
     byte instrId;
-    bool readyToRun;
 
-    chan sch_u = [0] of {byte, byte, mtype : action};
-    chan u_sch = [0] of {mtype : action};
+    chan sch_u = [0] of {byte, byte, mtype : action};       // warpId, instrId, gowarp
+    chan u_sch = [0] of {byte, mtype : action};             // instrId, donewarp
 
-    chan warps = [16] of {int, int, bool};      // warpId, instrId, readyToRun
+    chan warps = [16] of {int, int};      // warpId, instrId
 
     run unit(unitIdx, sch_u, u_sch);
 
@@ -199,25 +208,26 @@ proctype warp_scheduler(byte unitIdx; chan dev_sch; chan sch_dev) {
         sch_u ! 0, wgId, go;
 
         for (warpId : 0 .. nWarps - 1) {
-            warps ! warpId, 0, true;
+            isWarpReadyToRun[unitIdx * nWarps + warpId] = true;
+            warps ! warpId, 0;
         }
 
         do
         :: nempty(warps) ->
-            warps ? warpId, instrId, readyToRun;
+            warps ? warpId, instrId;
             if
-            :: readyToRun ->
+            :: isWarpReadyToRun[unitIdx * nWarps + warpId] ->
                 sch_u ! warpId, instrId, gowarp;
-                u_sch ? done;
+                u_sch ? instrId, donewarp;
                 instrId++;
                 if
                 :: instrId < nInstructions ->
-                    warps ! warpId, instrId, readyToRun;
+                    warps ! warpId, instrId;
                 :: else ->
                     skip;
                 fi;
             :: else ->
-                warps ! warpId, instrId, true;
+                warps ! warpId, instrId;
             fi;
         :: empty(warps) ->
             sch_u ! 0, 0, stopwarps;
