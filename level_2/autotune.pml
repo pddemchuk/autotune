@@ -11,46 +11,31 @@ int Tmin = 96;
 #define n 4
 #define INPUT_DATA_SIZE 16 // 2^n
 
-// x - FAA register; r - returned value
-inline FAA(x, r) {
+// arr -- within one device, isWarpReadyToRun[deviceIdx].arr[unitIdx * nWarpsPerUnit + warpId]
+typedef twoDimArray { byte arr[INPUT_DATA_SIZE / PES_PER_UNIT * UNITS_PER_DEVICE] };       // nWarpsPerUnit ~ INPUT_DATA_SIZE / PES_PER_UNIT
+
+twoDimArray barrierIn[DEVICES];
+
+inline barrier() {
+    barrierIn[deviceIdx].arr[unitIdx * nWarpsPerUnit + warpId] = 1;
     atomic {
-        r = x;
-        x = x + 1;
-    }
-}
-
-// FAA registers
-byte nWaitingWarps = 0;
-byte nWaitingWarpsOut = 0;
-
-inline barrier_in(nWaitingWarps, t) {
-    FAA(nWaitingWarps, t);
-    if
-    :: t < (nWorkingUnitsPerDevice * nWorkingDevices - 1) ->
-        isWarpReadyToRun[deviceIdx].arr[unitIdx * nWarpsPerUnit + warpId] = false;
-    :: else ->
-        nWaitingWarps = 0;
+        t = 0;
         for (d : 0 .. nWorkingDevices - 1) {
             for (u : 0 .. nWorkingUnitsPerDevice - 1) {
                 for (w : 0 .. nWarpsPerUnit - 1) {
-                    isWarpReadyToRun[d].arr[u * nWarpsPerUnit + w] = true;
+                    sum(t, barrierIn[d].arr[u * nWarpsPerUnit + w]);
                 }
             }
         }
-    fi;
-}
-
-inline barrier_out(nWaitingWarpsOut, t) {
-    FAA(nWaitingWarpsOut, t);
+    }
     if
-    :: t < (nWorkingUnitsPerDevice * nWorkingDevices  - 1) ->
-        isWarpReadyToRun[deviceIdx].arr[unitIdx * nWarpsPerUnit + warpId] = false;
-    :: else ->
-        nWaitingWarpsOut = 0;
-        for (d : 0 .. nWorkingDevices - 1) {
-            for (u : 0 .. nWorkingUnitsPerDevice - 1) {
-                for (w : 0 .. nWarpsPerUnit - 1) {
-                    isWarpReadyToRun[d].arr[u * nWarpsPerUnit + w] = true;
+    :: t == nWarps ->
+        atomic {
+            for (d : 0 .. nWorkingDevices - 1) {
+                for (u : 0 .. nWorkingUnitsPerDevice - 1) {
+                    for (w : 0 .. nWarpsPerUnit - 1) {
+                        barrierIn[d].arr[u * nWarpsPerUnit + w] = 0;
+                    }
                 }
             }
         }
@@ -95,7 +80,7 @@ byte allWorkingPEs = 0;
 byte nRunningPEs = 0;
 byte nWarpsPerUnit = 0;
 byte nWarps = 0;
-byte nInstructions = 6;
+byte nInstructions = 5;
 
 int globalTime = 0;
 byte unitsFinal = 0;
@@ -108,8 +93,6 @@ byte aoutput = 0;
 
 chan workgroups = [16] of {int, bool};      // wgId, readyToRun
 
-// arr -- within one device, isWarpReadyToRun[deviceIdx].arr[unitIdx * nWarpsPerUnit + warpId]
-typedef twoDimArray { byte arr[INPUT_DATA_SIZE / PES_PER_UNIT * UNITS_PER_DEVICE * DEVICES] };       // nWarpsPerUnit ~ INPUT_DATA_SIZE / PES_PER_UNIT 
 twoDimArray isWarpReadyToRun[DEVICES];
 
 // tuning parameters
@@ -183,10 +166,8 @@ proctype unit(byte deviceIdx; byte unitIdx; chan sch_u; chan u_sch) {
                     }
                 }
             :: instrId == 3 ->
-                barrier_in(nWaitingWarps, t);
+                barrier();
             :: instrId == 4 ->
-                barrier_out(nWaitingWarpsOut, t);
-            :: instrId == 5 ->
                 if
                 :: localId[0 * nWarpsPerUnit + warpId] == 0 ->
                     // заменить на nWarp * nWorkingPes ?
@@ -236,6 +217,7 @@ proctype warp_scheduler(byte deviceIdx; byte unitIdx; chan dev_sch; chan sch_dev
         do
         :: nempty(warps) ->
             warps ? warpId, instrId;
+            isWarpReadyToRun[deviceIdx].arr[unitIdx * nWarpsPerUnit + warpId] = !barrierIn[deviceIdx].arr[unitIdx * nWarpsPerUnit + warpId];
             if
             :: isWarpReadyToRun[deviceIdx].arr[unitIdx * nWarpsPerUnit + warpId] ->
                 sch_u ! warpId, instrId, gowarp;
@@ -390,12 +372,12 @@ active proctype main() {
     }
 
     select (i : 2 .. n - 1);
-    //workGroupSize = INPUT_DATA_SIZE >> (n - i);
-    workGroupSize = 2;  // 2 4
+    workGroupSize = INPUT_DATA_SIZE >> (n - i);
+    //workGroupSize = 2;  // 2 4
 
     select (i : 1 .. n - 1);
-    //tileSize = INPUT_DATA_SIZE >> (n - i);
-    tileSize = 2;   // 2 4 8
+    tileSize = INPUT_DATA_SIZE >> (n - i);
+    //tileSize = 2;   // 2 4 8
     tileSize = (workGroupSize * tileSize > INPUT_DATA_SIZE -> INPUT_DATA_SIZE / workGroupSize : tileSize);
 
     nWorkGroups = INPUT_DATA_SIZE / (workGroupSize * tileSize);
