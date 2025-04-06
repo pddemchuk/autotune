@@ -23,6 +23,40 @@ inline FAA(x, r) {
 byte nWaitingWarps = 0;
 byte nWaitingWarpsOut = 0;
 
+inline barrier_in(nWaitingWarps, t) {
+    FAA(nWaitingWarps, t);
+    if
+    :: t < (nWorkingUnitsPerDevice * nWorkingDevices - 1) ->
+        isWarpReadyToRun[deviceIdx].arr[unitIdx * nWarpsPerUnit + warpId] = false;
+    :: else ->
+        nWaitingWarps = 0;
+        for (d : 0 .. nWorkingDevices - 1) {
+            for (u : 0 .. nWorkingUnitsPerDevice - 1) {
+                for (w : 0 .. nWarpsPerUnit - 1) {
+                    isWarpReadyToRun[d].arr[u * nWarpsPerUnit + w] = true;
+                }
+            }
+        }
+    fi;
+}
+
+inline barrier_out(nWaitingWarpsOut, t) {
+    FAA(nWaitingWarpsOut, t);
+    if
+    :: t < (nWorkingUnitsPerDevice * nWorkingDevices  - 1) ->
+        isWarpReadyToRun[deviceIdx].arr[unitIdx * nWarpsPerUnit + warpId] = false;
+    :: else ->
+        nWaitingWarpsOut = 0;
+        for (d : 0 .. nWorkingDevices - 1) {
+            for (u : 0 .. nWorkingUnitsPerDevice - 1) {
+                for (w : 0 .. nWarpsPerUnit - 1) {
+                    isWarpReadyToRun[d].arr[u * nWarpsPerUnit + w] = true;
+                }
+            }
+        }
+    fi;
+}
+
 inline work_step() {
     atomic {
         curTime = globalTime;
@@ -149,41 +183,9 @@ proctype unit(byte deviceIdx; byte unitIdx; chan sch_u; chan u_sch) {
                     }
                 }
             :: instrId == 3 ->
-                atomic {
-                    t = nWaitingWarps;
-                    nWaitingWarps++;
-                    if
-                    :: t < (nWorkingUnitsPerDevice * nWorkingDevices - 1) ->
-                        isWarpReadyToRun[deviceIdx].arr[unitIdx * nWarpsPerUnit + warpId] = false;
-                    :: else ->
-                            nWaitingWarps = 0;
-                            for (d : 0 .. nWorkingDevices - 1) {
-                                for (u : 0 .. nWorkingUnitsPerDevice - 1) {
-                                    for (w : 0 .. nWarpsPerUnit - 1) {
-                                        isWarpReadyToRun[d].arr[u * nWarpsPerUnit + w] = true;
-                                    }
-                                }
-                            }
-                    fi;
-                }
+                barrier_in(nWaitingWarps, t);
             :: instrId == 4 ->
-                atomic{
-                    t = nWaitingWarpsOut;
-                    nWaitingWarpsOut++;
-                    if
-                    :: t < (nWorkingUnitsPerDevice * nWorkingDevices  - 1) ->
-                        isWarpReadyToRun[deviceIdx].arr[unitIdx * nWarpsPerUnit + warpId] = false;
-                    :: else ->
-                            nWaitingWarpsOut = 0;
-                            for (d : 0 .. nWorkingDevices - 1) {
-                                for (u : 0 .. nWorkingUnitsPerDevice - 1) {
-                                    for (w : 0 .. nWarpsPerUnit - 1) {
-                                        isWarpReadyToRun[d].arr[u * nWarpsPerUnit + w] = true;
-                                    }
-                                }
-                            }
-                    fi;
-                }
+                barrier_out(nWaitingWarpsOut, t);
             :: instrId == 5 ->
                 if
                 :: localId[0 * nWarpsPerUnit + warpId] == 0 ->
