@@ -1,7 +1,7 @@
 int Tmin = 96;
 
 // hardware parameters
-#define DEVICES 1
+#define DEVICES 2
 #define UNITS_PER_DEVICE 2
 #define PES_PER_UNIT 2
 #define GLOBAL_MEMORY_ACCESS 4
@@ -72,14 +72,18 @@ mtype : action = { done, stop, stopwarps, go, gowg, gowarp, donewarp };
 byte globalMemory[INPUT_DATA_SIZE];
 byte aoutput = 0;
 
-bool isWarpReadyToRun[INPUT_DATA_SIZE / PES_PER_UNIT * UNITS_PER_DEVICE * DEVICES];     // nWarpsPerUnit ~ INPUT_DATA_SIZE / PES_PER_UNIT
+chan workgroups = [16] of {int, bool};      // wgId, readyToRun
+
+// arr -- within one device, isWarpReadyToRun[deviceIdx].arr[unitIdx * nWarpsPerUnit + warpId]
+typedef twoDimArray { byte arr[INPUT_DATA_SIZE / PES_PER_UNIT * UNITS_PER_DEVICE * DEVICES] };       // nWarpsPerUnit ~ INPUT_DATA_SIZE / PES_PER_UNIT 
+twoDimArray isWarpReadyToRun[DEVICES];
 
 // tuning parameters
 int nWorkGroups = 0;
 int workGroupSize = 0;
 int tileSize = 0;
 
-proctype clock() {
+/*proctype clock() {
     do
     :: final -> break;
     :: nRunningPEs == allWorkingPEs - nWaitingPEs && allWorkingPEs != 0 && nWaitingPEs != allWorkingPEs ->
@@ -88,15 +92,16 @@ proctype clock() {
             globalTime++;
         }
     od
-}
+}*/
 
-proctype unit(byte unitIdx; chan sch_u; chan u_sch) {
+proctype unit(byte deviceIdx; byte unitIdx; chan sch_u; chan u_sch) {
     byte pesIdx;
     byte wgId;
     byte warpId;
     byte instrId;
     byte i;
     byte t;
+    byte d;
     byte u;
     byte w;
     byte tileIdx;
@@ -144,33 +149,37 @@ proctype unit(byte unitIdx; chan sch_u; chan u_sch) {
                     }
                 }
             :: instrId == 3 ->
-                atomic { // заменить на FAA
+                atomic {
                     t = nWaitingWarps;
                     nWaitingWarps++;
                     if
-                    :: t < (nWarps - 1) ->
-                        isWarpReadyToRun[unitIdx * nWarpsPerUnit + warpId] = false;
+                    :: t < (nWorkingUnitsPerDevice * nWorkingDevices - 1) ->
+                        isWarpReadyToRun[deviceIdx].arr[unitIdx * nWarpsPerUnit + warpId] = false;
                     :: else ->
                             nWaitingWarps = 0;
-                            for (u : 0 .. nWorkingUnitsPerDevice - 1) {
-                                for (w : 0 .. nWarpsPerUnit - 1) {
-                                    isWarpReadyToRun[u * nWarpsPerUnit + w] = true;
+                            for (d : 0 .. nWorkingDevices - 1) {
+                                for (u : 0 .. nWorkingUnitsPerDevice - 1) {
+                                    for (w : 0 .. nWarpsPerUnit - 1) {
+                                        isWarpReadyToRun[d].arr[u * nWarpsPerUnit + w] = true;
+                                    }
                                 }
                             }
                     fi;
                 }
             :: instrId == 4 ->
-                atomic{ // заменить на FAA
+                atomic{
                     t = nWaitingWarpsOut;
                     nWaitingWarpsOut++;
                     if
-                    :: t < (nWarps - 1) ->
-                        isWarpReadyToRun[unitIdx * nWarpsPerUnit + warpId] = false;
+                    :: t < (nWorkingUnitsPerDevice * nWorkingDevices  - 1) ->
+                        isWarpReadyToRun[deviceIdx].arr[unitIdx * nWarpsPerUnit + warpId] = false;
                     :: else ->
                             nWaitingWarpsOut = 0;
-                            for (u : 0 .. nWorkingUnitsPerDevice - 1) {
-                                for (w : 0 .. nWarpsPerUnit - 1) {
-                                    isWarpReadyToRun[u * nWarpsPerUnit + w] = true;
+                            for (d : 0 .. nWorkingDevices - 1) {
+                                for (u : 0 .. nWorkingUnitsPerDevice - 1) {
+                                    for (w : 0 .. nWarpsPerUnit - 1) {
+                                        isWarpReadyToRun[d].arr[u * nWarpsPerUnit + w] = true;
+                                    }
                                 }
                             }
                     fi;
@@ -199,7 +208,7 @@ proctype unit(byte unitIdx; chan sch_u; chan u_sch) {
     od;
 }
 
-proctype warp_scheduler(byte unitIdx; chan dev_sch; chan sch_dev) {
+proctype warp_scheduler(byte deviceIdx; byte unitIdx; chan dev_sch; chan sch_dev) {
     byte wgId;
     byte warpId;
 
@@ -210,7 +219,7 @@ proctype warp_scheduler(byte unitIdx; chan dev_sch; chan sch_dev) {
 
     chan warps = [16] of {int, int};      // warpId, instrId
 
-    run unit(unitIdx, sch_u, u_sch);
+    run unit(deviceIdx, unitIdx, sch_u, u_sch);
 
     do
     :: dev_sch ? wgId, go ->
@@ -218,7 +227,7 @@ proctype warp_scheduler(byte unitIdx; chan dev_sch; chan sch_dev) {
         sch_u ! 0, wgId, go;
 
         for (warpId : 0 .. nWarpsPerUnit - 1) {
-            isWarpReadyToRun[unitIdx * nWarpsPerUnit + warpId] = true;
+            isWarpReadyToRun[deviceIdx].arr[unitIdx * nWarpsPerUnit + warpId] = true;
             warps ! warpId, 0;
         }
 
@@ -226,7 +235,7 @@ proctype warp_scheduler(byte unitIdx; chan dev_sch; chan sch_dev) {
         :: nempty(warps) ->
             warps ? warpId, instrId;
             if
-            :: isWarpReadyToRun[unitIdx * nWarpsPerUnit + warpId] ->
+            :: isWarpReadyToRun[deviceIdx].arr[unitIdx * nWarpsPerUnit + warpId] ->
                 sch_u ! warpId, instrId, gowarp;
                 u_sch ? instrId, donewarp;
                 instrId++;
@@ -250,7 +259,7 @@ proctype warp_scheduler(byte unitIdx; chan dev_sch; chan sch_dev) {
     od;
 }
 
-proctype device(chan d_hst; chan hst_d) {
+proctype device(byte deviceIdx; chan d_hst; chan hst_d) {
     byte wgId;
     byte unitIdx;
     bool readyToRun;
@@ -259,15 +268,9 @@ proctype device(chan d_hst; chan hst_d) {
     chan dev_sch = [0] of {byte, mtype : action};
     chan sch_dev = [0] of {mtype : action};
 
-    chan workgroups = [16] of {int, bool};      // wgId, readyToRun
-
-    for (wgId : 0 .. nWorkGroups - 1) {
-        workgroups ! wgId, true;
-    }
-
     atomic {
         for (unitIdx : 0 .. nWorkingUnitsPerDevice - 1) {
-            run warp_scheduler(unitIdx, dev_sch, sch_dev);
+            run warp_scheduler(deviceIdx, unitIdx, dev_sch, sch_dev);
         }
     }
     do
@@ -343,16 +346,34 @@ proctype device(chan d_hst; chan hst_d) {
 }
 
 proctype host() {
-    chan d_hst = [0] of { mtype : action };
+    byte deviceIdx;
+
     chan hst_d = [0] of { mtype : action };
+    chan d_hst = [0] of { mtype : action };
 
     final = false;
 
-    run device(d_hst, hst_d);
-    hst_d ! go;
+    byte wgId;
+    for (wgId : 0 .. nWorkGroups - 1) {
+        workgroups ! wgId, true;
+    }
+
     atomic {
-        d_hst ? done;
-        hst_d ! stop;
+        for (deviceIdx : 0 .. nWorkingDevices - 1) {
+            run device(deviceIdx, d_hst, hst_d);
+        }
+    }
+
+    atomic {
+        for (deviceIdx : 0 .. nWorkingDevices - 1) {
+            hst_d ! go;
+        }
+    }
+    atomic {
+        for (deviceIdx : 0 .. nWorkingDevices - 1) {
+            d_hst ? done;
+            hst_d ! stop;
+        }
     }
 
     unitsFinal == nWorkingUnitsPerDevice * nWorkingDevices;
@@ -386,7 +407,7 @@ active proctype main() {
 
     atomic {
         run host();
-        run clock();
+        //run clock();
     }
 }
 
