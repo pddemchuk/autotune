@@ -39,6 +39,7 @@ inline barrier() {
                 }
             }
         }
+    :: else -> skip;
     fi;
 }
 
@@ -80,7 +81,7 @@ byte allWorkingPEs = 0;
 byte nRunningPEs = 0;
 byte nWarpsPerUnit = 0;
 byte nWarps = 0;
-byte nInstructions = 5;
+byte nInstructions = 7;
 
 int globalTime = 0;
 byte unitsFinal = 0;
@@ -121,13 +122,14 @@ proctype unit(byte deviceIdx; byte unitIdx; chan sch_u; chan u_sch) {
     byte d;
     byte u;
     byte w;
-    byte tileIdx;
 
     byte localMemory[LOCAL_MEMORY_SIZE];
 
     // private memory (registers)
     byte localId[INPUT_DATA_SIZE];
     byte globalOffset[INPUT_DATA_SIZE];
+    byte tileIdx[INPUT_DATA_SIZE];
+    byte readyToEvenSum[INPUT_DATA_SIZE];
 
     do
     :: sch_u ? 0, wgId, go ->
@@ -153,21 +155,38 @@ proctype unit(byte deviceIdx; byte unitIdx; chan sch_u; chan u_sch) {
                     }
                 }
             :: instrId == 2 ->
-                for (tileIdx : 0 .. tileSize - 1) {
-                    atomic {
-                        for (pesIdx : 0 .. nWorkingPEsPerUnit - 1) {
-                            if
-                            :: tileIdx + globalOffset[pesIdx * nWarpsPerUnit + warpId] >= INPUT_DATA_SIZE -> break;
-                            :: else -> skip;
-                            fi;
-                            even_sum(localMemory[localId[pesIdx * nWarpsPerUnit + warpId]], globalMemory[tileIdx + globalOffset[pesIdx * nWarpsPerUnit + warpId]]);
-                        }
-                        globalTime = globalTime + GLOBAL_MEMORY_ACCESS;
+                atomic {
+                    for (pesIdx : 0 .. nWorkingPEsPerUnit - 1) {
+                        if
+                        :: tileIdx[warpId] + globalOffset[pesIdx * nWarpsPerUnit + warpId] < INPUT_DATA_SIZE ->
+                            readyToEvenSum[pesIdx * nWarpsPerUnit + warpId] = 1;
+                        :: else -> skip;
+                        fi;
                     }
                 }
             :: instrId == 3 ->
+                atomic {
+                    for (pesIdx : 0 .. nWorkingPEsPerUnit - 1) {
+                        if
+                        :: readyToEvenSum[pesIdx * nWarpsPerUnit + warpId] ->
+                            even_sum(localMemory[localId[pesIdx * nWarpsPerUnit + warpId]], globalMemory[tileIdx[warpId] + globalOffset[pesIdx * nWarpsPerUnit + warpId]]);
+                            globalTime = globalTime + GLOBAL_MEMORY_ACCESS; // неправильно
+                        :: else -> skip;
+                        fi;
+                    }
+                }
+            :: instrId == 4 -> // for (tileIdx : 0 .. tileSize - 1)
+                atomic {
+                    tileIdx[warpId]++;
+                    if
+                    :: tileIdx[warpId] < tileSize - 1 ->
+                        instrId = instrId - 3;
+                    :: else -> skip;
+                    fi;
+                }
+            :: instrId == 5 ->
                 barrier();
-            :: instrId == 4 ->
+            :: instrId == 6 ->
                 if
                 :: localId[0 * nWarpsPerUnit + warpId] == 0 ->
                     // заменить на nWarp * nWorkingPes ?
