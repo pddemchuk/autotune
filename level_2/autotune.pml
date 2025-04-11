@@ -3,10 +3,10 @@ int Tmin = 96;
 // hardware parameters
 #define DEVICES 2
 #define UNITS_PER_DEVICE 2
-#define PES_PER_UNIT 2
+#define PES_PER_UNIT 4
 #define LOCAL_MEMORY_ACCESS 1
 #define GLOBAL_MEMORY_ACCESS 4
-#define LOCAL_MEMORY_SIZE 8
+#define LOCAL_MEMORY_SIZE 32
 
 // input data
 #define n 4
@@ -94,7 +94,7 @@ bool final;
 mtype : action = { done, stop, stopwarps, go, gowg, gowarp, donewarp };
 
 byte globalMemory[INPUT_DATA_SIZE];
-byte aoutput = 0;
+int aoutput = 0;
 
 chan workgroups = [16] of {int, bool};      // wgId, readyToRun
 
@@ -130,7 +130,7 @@ proctype unit(byte deviceIdx; byte unitIdx; chan sch_u; chan u_sch) {
     int startTime = 0;
     int curTime = 0;
 
-    byte localMemory[LOCAL_MEMORY_SIZE];
+    int localMemory[LOCAL_MEMORY_SIZE];
 
     // private memory (registers)
     byte localId[INPUT_DATA_SIZE];
@@ -143,6 +143,13 @@ proctype unit(byte deviceIdx; byte unitIdx; chan sch_u; chan u_sch) {
 
         for (i : 0 .. LOCAL_MEMORY_SIZE - 1) {
             localMemory[i] = 0;
+        }
+
+        for (i : 0 .. INPUT_DATA_SIZE - 1) {
+            localId[i] = 0;
+            globalOffset[i] = 0;
+            tileIdx[i] = 0;
+            readyToEvenSum[i] = 0;
         }
 
         do
@@ -184,6 +191,7 @@ proctype unit(byte deviceIdx; byte unitIdx; chan sch_u; chan u_sch) {
                         :: readyToEvenSum[pesIdx * nWarpsPerUnit + warpId] ->
                             even_sum(localMemory[localId[pesIdx * nWarpsPerUnit + warpId]], globalMemory[tileIdx[warpId] + globalOffset[pesIdx * nWarpsPerUnit + warpId]]);
                             longWorkFlag = true;
+                            readyToEvenSum[pesIdx * nWarpsPerUnit + warpId] = 0;
                         :: else -> skip;
                         fi;
                     }
@@ -430,7 +438,7 @@ active proctype main() {
 
     atomic {
         run host();
-        run clock();
+        //run clock();
     }
 }
 
