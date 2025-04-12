@@ -1,9 +1,9 @@
-int Tmin = 96;
+int Tmin = 101;
 
 // hardware parameters
 #define DEVICES 2
 #define UNITS_PER_DEVICE 2
-#define PES_PER_UNIT 4
+#define PES_PER_UNIT 2
 #define LOCAL_MEMORY_ACCESS 1
 #define GLOBAL_MEMORY_ACCESS 4
 #define LOCAL_MEMORY_SIZE 32
@@ -138,6 +138,7 @@ proctype unit(byte deviceIdx; byte unitIdx; chan sch_u; chan u_sch) {
     byte tileIdx[INPUT_DATA_SIZE];
     byte readyToEvenSum[INPUT_DATA_SIZE];
 
+    // цикл по воркгруппам
     do
     :: sch_u ? 0, wgId, go ->
 
@@ -152,6 +153,7 @@ proctype unit(byte deviceIdx; byte unitIdx; chan sch_u; chan u_sch) {
             readyToEvenSum[i] = 0;
         }
 
+        // цикл по варпам
         do
         :: sch_u ? warpId, instrId, gowarp ->
 
@@ -161,18 +163,21 @@ proctype unit(byte deviceIdx; byte unitIdx; chan sch_u; chan u_sch) {
             }
 
             if
+            // индекс в локальной памяти
             :: instrId == 0 ->
                 atomic {
                     for (pesIdx : 0 .. nWorkingPEsPerUnit - 1) {
                         localId[pesIdx * nWarpsPerUnit + warpId] = (workGroupSize > nWorkingPEsPerUnit -> pesIdx + warpId * nWorkingPEsPerUnit : pesIdx);
                     }
                 }
+            // сдвиг в исходном массиве
             :: instrId == 1 ->
                 atomic {
                     for (pesIdx : 0 .. nWorkingPEsPerUnit - 1) {
                         globalOffset[pesIdx * nWarpsPerUnit + warpId] = tileSize * (wgId * workGroupSize + localId[pesIdx * nWarpsPerUnit + warpId]);
                     }
                 }
+            // проверка на выход за границы исходного массива, readyToEvenSum -- предикатный регистр
             :: instrId == 2 ->
                 atomic {
                     for (pesIdx : 0 .. nWorkingPEsPerUnit - 1) {
@@ -183,6 +188,7 @@ proctype unit(byte deviceIdx; byte unitIdx; chan sch_u; chan u_sch) {
                         fi;
                     }
                 }
+            // суммируем, если предикатный регистр = 1
             :: instrId == 3 ->
                 atomic {
                     longWorkFlag = false;
@@ -202,6 +208,7 @@ proctype unit(byte deviceIdx; byte unitIdx; chan sch_u; chan u_sch) {
                 :: else -> skip;
                 fi;
                 }
+            // цикл по tiles: если внутри цикла, возвращаемся на инструкцию 1
             :: instrId == 4 -> // for (tileIdx : 0 .. tileSize - 1)
                 atomic {
                     tileIdx[warpId]++;
@@ -213,11 +220,11 @@ proctype unit(byte deviceIdx; byte unitIdx; chan sch_u; chan u_sch) {
                 }
             :: instrId == 5 ->
                 barrier();
+            // пекс, у которого локальный индекс = 0, сумммирует все локальные результаты в глобальную переменную, хранящую результат
             :: instrId == 6 ->
                 if
                 :: localId[0 * nWarpsPerUnit + warpId] == 0 ->
-                    // заменить на nWarp * nWorkingPes ?
-                    for (i : 0 .. LOCAL_MEMORY_SIZE - 1) {
+                    for (i : 0 .. nWarpsPerUnit * nWorkingPEsPerUnit - 1) {
                         atomic {
                             sum(aoutput, localMemory[i]);
                             long_work(GLOBAL_MEMORY_ACCESS);
@@ -228,6 +235,7 @@ proctype unit(byte deviceIdx; byte unitIdx; chan sch_u; chan u_sch) {
                 fi;
             fi;
 
+            // инструкция с номером instrId выполнена
             u_sch ! instrId, donewarp;
         :: sch_u ? 0, 0, stopwarps ->
             break;
@@ -256,6 +264,7 @@ proctype warp_scheduler(byte deviceIdx; byte unitIdx; chan dev_sch; chan sch_dev
 
         sch_u ! 0, wgId, go;
 
+        // warps -- очередь варпов, isWarpReadyToRun -- массив битов готовности варпов
         for (warpId : 0 .. nWarpsPerUnit - 1) {
             isWarpReadyToRun[deviceIdx].arr[unitIdx * nWarpsPerUnit + warpId] = true;
             warps ! warpId, 0;
@@ -264,14 +273,18 @@ proctype warp_scheduler(byte deviceIdx; byte unitIdx; chan dev_sch; chan sch_dev
         do
         :: nempty(warps) ->
             warps ? warpId, instrId;
+            // barrierIn -- массив, в котором элемент = 1, если варп ждет в барьере
+            // соответсвенно бит готовности варпа = 1, если он не в барьере
             isWarpReadyToRun[deviceIdx].arr[unitIdx * nWarpsPerUnit + warpId] = !barrierIn[deviceIdx].arr[unitIdx * nWarpsPerUnit + warpId];
             if
             :: isWarpReadyToRun[deviceIdx].arr[unitIdx * nWarpsPerUnit + warpId] ->
+                // снимает с очереди варп и отправляет юниту
                 sch_u ! warpId, instrId, gowarp;
                 u_sch ? instrId, donewarp;
                 instrId++;
                 if
                 :: instrId < nInstructions ->
+                    // возрващает варп в конец очереди
                     warps ! warpId, instrId;
                 :: else ->
                     skip;
@@ -306,6 +319,7 @@ proctype device(byte deviceIdx; chan d_hst; chan hst_d) {
     }
     do
     :: hst_d ? go ->
+        // снимает с очереди воркгруппы и отправляет варп_шедулерам
         atomic {
             unitIdx = 0;
             do
@@ -384,6 +398,7 @@ proctype host() {
 
     final = false;
 
+    // workgroups -- глобальная очередь воркгрупп (одна на все девайсы)
     byte wgId;
     for (wgId : 0 .. nWorkGroups - 1) {
         workgroups ! wgId, true;
@@ -407,6 +422,7 @@ proctype host() {
         }
     }
 
+    // ждет пока все юниты закончат работу
     unitsFinal == nWorkingUnitsPerDevice * nWorkingDevices;
     final = true;
 }
@@ -438,7 +454,7 @@ active proctype main() {
 
     atomic {
         run host();
-        //run clock();
+        run clock();
     }
 }
 
