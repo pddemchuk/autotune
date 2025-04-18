@@ -8,7 +8,7 @@ usage() {
 seed=$1
 [[ $seed ]] || usage
 
-depth=1400
+depth=140000
 
 spin -p -s -r -X -v -n"$1" -l -g -u$depth autotune.pml > log
 spin -s -r -X -v -n"$1" -l -g -u$depth autotune.pml > log_full
