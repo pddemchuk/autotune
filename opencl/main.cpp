@@ -4,7 +4,7 @@
 #include <sys/time.h>
 #include <CL/cl.h>
 
-#define MAXSIZE (16)
+#define MAXSIZE (32)
 
 
 int main(int argc, const char *argv[]) {
@@ -65,13 +65,13 @@ int main(int argc, const char *argv[]) {
     double mid_gb = 0;
     double mid_time = 0;
 
-    int C = 1; //count of re-runs
+    int C = 100; //count of re-runs
 
     printf("\ngo\n");
 
     int SM = 1;
     int TS_real = 4;
-    int WG_real = 4;
+    int WG_real = 1;
 
     mid_time = 0;
     mid_gb= 0;
@@ -98,24 +98,24 @@ int main(int argc, const char *argv[]) {
         long long exec_time = ((long long)final_time.tv_sec * 1000000 + final_time.tv_usec) -
         		((long long)initial_time.tv_sec * 1000000 + initial_time.tv_usec);
 
-        printf("\nExecution time was %llu microseconds\n", exec_time);
+        //printf("\nExecution time was %llu microseconds\n", exec_time);
 
         float bandwidth = 1e-9*(float)(MAXSIZE*sizeof(cl_uint)) / ((float)exec_time/1e6);
 
-        printf("Memory bandwidth %.2f GB/sec\n", bandwidth);
+        //printf("Memory bandwidth %.2f GB/sec\n", bandwidth);
 
         mid_time += exec_time;
         mid_gb += bandwidth;
 
-        printf("--- After ---\n");
-        printf("sum: %d\n", sum);
+        //printf("--- After ---\n");
+        //printf("sum: %d\n", sum);
 
         //clEnqueueReadBuffer(queue, my_cl_array, CL_TRUE, 0, MAXSIZE * sizeof(int), array, 0, NULL, NULL);
 
         clFlush(queue);
-
-        printf("\nSM = %d; WG = %d; TS = %d; time = %lf; gb = %lf \n\n",SM, WG_real, TS_real, mid_time / (C*1000), mid_gb / C);
     }
+
+    printf("\nSM = %d; WG = %d; TS = %d; time = %lf; gb = %lf \n\n",SM, WG_real, TS_real, mid_time / (C*1000), mid_gb / C);
 
     clFinish(queue);
     clReleaseKernel(kernel);
