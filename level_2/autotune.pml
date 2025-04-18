@@ -1,16 +1,16 @@
-int Tmin = 101;
+int Tmin = 24;
 
 // hardware parameters
-#define DEVICES 2
-#define UNITS_PER_DEVICE 2
-#define PES_PER_UNIT 2
+#define DEVICES 1
+#define UNITS_PER_DEVICE 1
+#define PES_PER_UNIT 64
 #define LOCAL_MEMORY_ACCESS 1
 #define GLOBAL_MEMORY_ACCESS 4
-#define LOCAL_MEMORY_SIZE 32
+#define LOCAL_MEMORY_SIZE 16
 
 // input data
-#define n 4
-#define INPUT_DATA_SIZE 16 // 2^n
+#define n 6
+#define INPUT_DATA_SIZE 64 // 2^n
 
 // arr -- within one device, isWarpReadyToRun[deviceIdx].arr[unitIdx * nWarpsPerUnit + warpId]
 typedef twoDimArray { byte arr[INPUT_DATA_SIZE / PES_PER_UNIT * UNITS_PER_DEVICE] };       // nWarpsPerUnit ~ INPUT_DATA_SIZE / PES_PER_UNIT
@@ -435,12 +435,12 @@ active proctype main() {
     }
 
     select (i : 2 .. n - 1);
-    workGroupSize = INPUT_DATA_SIZE >> (n - i);
-    //workGroupSize = 2;  // 2 4
+    //workGroupSize = INPUT_DATA_SIZE >> (n - i);
+    workGroupSize = 8;  // 2 4
 
     select (i : 1 .. n - 1);
-    tileSize = INPUT_DATA_SIZE >> (n - i);
-    //tileSize = 2;   // 2 4 8
+    //tileSize = INPUT_DATA_SIZE >> (n - i);
+    tileSize = 8;   // 2 4 8
     tileSize = (workGroupSize * tileSize > INPUT_DATA_SIZE -> INPUT_DATA_SIZE / workGroupSize : tileSize);
 
     nWorkGroups = INPUT_DATA_SIZE / (workGroupSize * tileSize);
@@ -464,3 +464,5 @@ ltl OverTime { [] (final -> (globalTime > Tmin)) }
 ltl Sum6 { [] (final -> ( aoutput == 6 )) }
 ltl Sum20 { [] (final -> ( aoutput == 20 )) }
 ltl Sum72 { [] (final -> ( aoutput == 72 )) }
+ltl Sum272 { [] (final -> ( aoutput == 272 )) }
+ltl Sum1056 { [] (final -> ( aoutput == 1056 )) }
