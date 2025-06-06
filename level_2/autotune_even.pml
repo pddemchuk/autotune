@@ -1,4 +1,4 @@
-int Tmin = 20;
+int Tmin = 24;
 
 // hardware parameters
 #define DEVICES 1
@@ -61,10 +61,10 @@ inline long_work(dt) {
     od;
 }
 
-inline min(a, b) {
+inline even_sum(a, b) {
     atomic {
         if
-        :: a > b -> a = b;
+        :: b % 2 == 0 -> a = a + b;
         :: else -> skip;
         fi
     }
@@ -94,7 +94,7 @@ bool final;
 mtype : action = { done, stop, stopwarps, go, gowg, gowarp, donewarp };
 
 byte globalMemory[INPUT_DATA_SIZE];
-int aoutput = 100000;
+int aoutput = 0;
 
 chan workgroups = [16] of {int, bool};      // wgId, readyToRun
 
@@ -143,7 +143,7 @@ proctype unit(byte deviceIdx; byte unitIdx; chan sch_u; chan u_sch) {
     :: sch_u ? 0, wgId, go ->
 
         for (i : 0 .. LOCAL_MEMORY_SIZE - 1) {
-            localMemory[i] = 100000;
+            localMemory[i] = 0;
         }
 
         for (i : 0 .. INPUT_DATA_SIZE - 1) {
@@ -188,14 +188,14 @@ proctype unit(byte deviceIdx; byte unitIdx; chan sch_u; chan u_sch) {
                         fi;
                     }
                 }
-            // ищем минимум, если предикатный регистр = 1
+            // суммируем, если предикатный регистр = 1
             :: instrId == 3 ->
                 atomic {
                     longWorkFlag = false;
                     for (pesIdx : 0 .. nWorkingPEsPerUnit - 1) {
                         if
                         :: readyToEvenSum[pesIdx * nWarpsPerUnit + warpId] ->
-                            min(localMemory[localId[pesIdx * nWarpsPerUnit + warpId]], globalMemory[tileIdx[warpId] + globalOffset[pesIdx * nWarpsPerUnit + warpId]]);
+                            even_sum(localMemory[localId[pesIdx * nWarpsPerUnit + warpId]], globalMemory[tileIdx[warpId] + globalOffset[pesIdx * nWarpsPerUnit + warpId]]);
                             longWorkFlag = true;
                             readyToEvenSum[pesIdx * nWarpsPerUnit + warpId] = 0;
                         :: else -> skip;
@@ -204,6 +204,7 @@ proctype unit(byte deviceIdx; byte unitIdx; chan sch_u; chan u_sch) {
                 if
                 :: longWorkFlag ->
                     long_work(GLOBAL_MEMORY_ACCESS);
+                    startTime = curTime;
                 :: else -> skip;
                 fi;
                 }
@@ -219,20 +220,17 @@ proctype unit(byte deviceIdx; byte unitIdx; chan sch_u; chan u_sch) {
                 }
             :: instrId == 5 ->
                 barrier();
-            // пекс, у которого локальный индекс = 0, ищет локальный минимум
+            // пекс, у которого локальный индекс = 0, сумммирует все локальные результаты в глобальную переменную, хранящую результат
             :: instrId == 6 ->
                 if
                 :: localId[0 * nWarpsPerUnit + warpId] == 0 ->
                     for (i : 0 .. nWarpsPerUnit * nWorkingPEsPerUnit - 1) {
                         atomic {
-                            min(localMemory[localId[0]], localMemory[i]);
+                            sum(aoutput, localMemory[i]);
+                            long_work(GLOBAL_MEMORY_ACCESS);
                             startTime = curTime;
-                            long_work(LOCAL_MEMORY_ACCESS);
                         }
                     }
-                    min(aoutput, localMemory[localId[0]]);
-                    startTime = curTime;
-                    long_work(GLOBAL_MEMORY_ACCESS);
                 :: else -> skip;
                 fi;
             fi;
